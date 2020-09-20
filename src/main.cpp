@@ -1,3 +1,5 @@
+#define CONFIG_USE_ONLY_LWIP_SELECT 1
+
 // edit the config.h file and enter your Adafruit IO credentials
 // and any additional configuration needed for WiFi, cellular,
 // or ethernet clients.
@@ -7,7 +9,6 @@
 #include <ArduinoOTA.h>
 
 #define FASTLED_RMT_MAX_CHANNELS 1
-
 #include "FastLED.h"
 
 FASTLED_USING_NAMESPACE
@@ -40,10 +41,18 @@ enum WhichLeds {
   Woman = 1,
   Both = 2
 };
+const int lettersStart[] = {WStart,CStart,ManStart,WomanStart};
+const int lettersEnd[] = {WEnd,CEnd,ManEnd,WomanEnd};
 
 // Animations functions declarations
-void quiet(int brightness);
+void quiet(byte color);
 void nextPattern();
+void paintRange(int start, int end, CRGB color);
+void paintAll(CRGB color);
+void confettiLetters();
+void fill();
+void blink();
+void splash();
 void changeHue(int &currHue, int &destHue, int iStart, int iEnd);
 void singleColor();
 void toggleSegment(int iStart, int iEnd, int hue, int sat);
@@ -57,25 +66,25 @@ void bpm();
 void juggle();
 void dotted();
 
-int brightness = 96;
+int brightness = 20;
+int animSel = 0;
 bool isPlain = true;
+
+#define ARRAY_SIZE(A) (sizeof(A) / sizeof((A)[0]))
 
 // List of patterns to cycle through.  Each is defined as a separate function below loop code.
 typedef void (*SimplePatternList[])();
-//SimplePatternList gPatterns = { toggle };
-SimplePatternList gPatterns = { toggle, dotted, singleColor, rainbow, confetti };
+SimplePatternList gPatterns = { confetti, rainbow, singleColor, splash, blink, confettiLetters, dotted, bpm };
+//SimplePatternList gPatterns = { toggle, dotted, singleColor, rainbow, confetti };
 
 uint8_t gCurrentPatternNumber = 0; // Index number of which pattern is current
 uint8_t gHue = 0; // rotating "base color" used by many of the patterns
 
-int anaReadVal;
-
-//////// from here starts button code that needs cleaning //////
-bool setButtonRead = false;
-byte buttonRead = 0;
-byte buttonReadPrev = 0;
-bool setButtonValue = false;
-int buttonValue = 0;
+// bool setBrightnessValue = false;
+int brightnessValue = 0;
+// bool setAnimSelValue = false;
+int animSelValue = 0;
+bool resetPatternNumber = false;
 bool resetFlag = false;
 
 unsigned int lastReportTime = 0;
@@ -84,6 +93,7 @@ unsigned int lastMonitorTime = 0;
 // set up the 'time/seconds' topic
 AdafruitIO_Time *seconds = io.time(AIO_TIME_SECONDS);
 time_t secTime = 0;
+bool secondFlag = false;
 
 // set up the 'time/milliseconds' topic
 //AdafruitIO_Time *msecs = io.time(AIO_TIME_MILLIS);
@@ -93,13 +103,22 @@ time_t secTime = 0;
 // char *isoTime;
 
 // this int will hold the current count for our sketch
-int count = 0;
+// int count = 0;
 
 // set up the 'counter' feed
-AdafruitIO_Feed *counter = io.feed("counter");
-AdafruitIO_Feed *rssi = io.feed("rssi");
-AdafruitIO_Feed *reportButton = io.feed("button");
+// AdafruitIO_Feed *counter = io.feed("counter");
+// set up mqtt feeds
+AdafruitIO_Feed *rssi = io.feed("rssi_wc_sign");
+AdafruitIO_Feed *animSelFeed = io.feed("button");
+AdafruitIO_Feed *brightnessFeed = io.feed("brightness");
 
+TaskHandle_t Task1;
+
+QueueHandle_t brightnessQueue;
+const int brightnessQueueSize = 10;
+
+QueueHandle_t animationQueue;
+const int animationQueueSize = 10;
 
 // message handler for the seconds feed
 void handleSecs(char *data, uint16_t len) {
@@ -121,11 +140,22 @@ void handleSecs(char *data, uint16_t len) {
 //   isoTime = data;
 // }
 
-void setButton(AdafruitIO_Data *data) {
-  Serial.print("received new button value <- ");
+void setBrightness(AdafruitIO_Data *data) {
+  Serial.print("[0] received new brightness value from web ");
   Serial.println(data->value());
-  buttonValue = atoi(data->value());
-  setButtonValue = true;
+  brightnessValue = atoi(data->value());
+  xQueueSend(brightnessQueue, &brightnessValue, portMAX_DELAY);
+  // setBrightnessValue = true;
+}
+
+void setAnimation(AdafruitIO_Data *data) {
+  Serial.print("[0] received new animation selected value from web ");
+  Serial.println(data->value());
+  animSelValue = atoi(data->value());
+  xQueueSend(animationQueue, &animSelValue, portMAX_DELAY);
+  if (animSelValue == 0) {
+    resetPatternNumber = true;
+  }
 }
 
 void printDigits(int digits){
@@ -159,15 +189,7 @@ time_t timeSync()
   return (secTime + TZ_HOUR_SHIFT * 3600);
 }
 
-void setup() {
-  // tell FastLED about the LED strip configuration
-  FastLED.addLeds<LED_TYPE,DATA_PIN,COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
-  
-  // start the serial connection
-  Serial.begin(115200);
-
-  // wait for serial monitor to open
-  while(! Serial);
+void MonitorLoop( void * parameter) {
 
   Serial.print("Connecting to Adafruit IO");
 
@@ -183,8 +205,11 @@ void setup() {
   // attach a message handler for the ISO feed
   // iso->onMessage(handleISO);
 
-  // attach message handler for the button feed
-  reportButton->onMessage(setButton);
+  // attach message handler for the brightness feed
+  brightnessFeed->onMessage(setBrightness);
+
+  // attach message handler for the button animation selector feed
+  animSelFeed->onMessage(setAnimation);
 
   // wait for a connection
   while(io.status() < AIO_CONNECTED) {
@@ -199,7 +224,8 @@ void setup() {
   // Because Adafruit IO doesn't support the MQTT retain flag, we can use the
   // get() function to ask IO to resend the last value for this feed to just
   // this MQTT client after the io client is connected.
-  reportButton->get();
+  brightnessFeed->get();
+  animSelFeed->get();
 
   setSyncProvider(timeSync);
   setSyncInterval(60); // sync interval in seconds, consider increasing
@@ -246,9 +272,7 @@ void setup() {
 
   ArduinoOTA.begin();
 
-}
-
-void loop() {
+  for(;;) {
   unsigned int currTime = millis();
 
   ArduinoOTA.handle();
@@ -266,102 +290,120 @@ void loop() {
       Serial.print("Time set, time is now <- ");
       digitalClockDisplay();
     }
-    else {
-      return;
-    }
+      // else {
+      //   return;
+      // }
   }
   
   if (currTime - lastMonitorTime >= (MONITOR_SECS * 1000)) {
     // save count to the 'counter' feed on Adafruit IO
-    Serial.print("sending count and rssi value -> ");
-    Serial.println(count);
-    counter->save(count);
+    Serial.print("sending rssi value -> ");
+    // Serial.println(count);
+    // counter->save(count);
     // save the wifi signal strength (RSSI) to the 'rssi' feed on Adafruit IO
     rssi->save(WiFi.RSSI());
     
     Serial.print("Time is: ");
     digitalClockDisplay();
 
-    Serial.print("Button value # ");
-    Serial.println(buttonValue);
+    Serial.print("Brightness value # ");
+    Serial.println(brightnessValue);
+
+    Serial.print("Animation selected value # ");
+    Serial.println(animSelValue);
 
     // increment the count by 1
-    count++;
+    // count++;
     lastMonitorTime = currTime;
   }
   
-// commenting out button section until repurposed for analog status reporting
-  // if(((currTime - lastReportTime) >= (DEBOUNCE_SECS * 1000)) || (currTime < (DEBOUNCE_SECS * 1000))) {
-    // make debounce for button reads and reports
-    // buttonRead = digitalRead(BUTTON_IO);
-    // if (buttonRead) {
-      // buttonPresses++;
-      // Serial.print("sending button pressed! # is now -> ");
-      // Serial.println(buttonPresses);
-      // digitalClockDisplay();
-      // reportButton->save(buttonPresses);
-      // lastReportTime = currTime;
-    // }
+  // // counter disabled to not overload adfruit IO for no need
+  // // reset the count at some hour of the day
+  // if ((hour() == RESET_HOUR) && (minute() == 0) && (second() == 0) && (!resetFlag)) {
+  //   Serial.print("sending count and presses reset at time -> ");
+  //   digitalClockDisplay();
+  //   count = 0;
+  //   counter->save(count);
+  //   // remember a reset happened so we don't do it again and bombard Adafruit IO with requests
+  //   resetFlag = true;
   // }
-  if(((currTime - lastReportTime) >= (DEBOUNCE_SECS * 1000)) || (currTime < (DEBOUNCE_SECS * 1000))) {
-    if (setButtonRead) {
-      Serial.print("Value changed, update web value! # is now -> ");
-      Serial.println(buttonRead);
-      digitalClockDisplay();
-      reportButton->save(buttonRead);
-      lastReportTime = currTime;
-      setButtonRead = false;
-    }
-  }
 
-  // reset the count at some hour of the day
-  if ((hour() == RESET_HOUR) && (minute() == 0) && (second() == 0) && (!resetFlag)) {
-    Serial.print("sending count and presses reset at time -> ");
-    digitalClockDisplay();
-    count = 0;
-    counter->save(count);
-    // remember a reset happened so we don't do it again and bombard Adafruit IO with requests
-    resetFlag = true;
-  }
+  //// reallow reset to occur after reset time has passed
+  // if (second() == 1) {
+  //   resetFlag = false;
+  // }
 
-  // reallow reset to occur after reset time has passed
-  if (second() == 1) {
-    resetFlag = false;
+    vTaskDelay(5);
   }
+}
 
+void setup() { 
+  // tell FastLED about the LED strip configuration
+  FastLED.addLeds<LED_TYPE,DATA_PIN,COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
+
+  // start the serial connection
+  Serial.begin(115200);
+  disableCore0WDT();
+
+  brightnessQueue = xQueueCreate( brightnessQueueSize, sizeof( int ) );
+  animationQueue = xQueueCreate( animationQueueSize, sizeof( int ) );
+
+  // wait for serial monitor to open
+  while(! Serial);
+
+  xTaskCreatePinnedToCore(
+      MonitorLoop, /* Function to implement the task */
+      "MonitorTask", /* Name of the task */
+      16384,  /* Stack size in words */
+      NULL,  /* Task input parameter */
+      0,  /* Priority of the task */
+      &Task1,  /* Task handle. */
+      0); /* Core where the task should run */
+
+}
+
+void loop()
+{
+  // check queues for new values
+  if(xQueueReceive(brightnessQueue, &brightness, 0) == pdTRUE) {
+    Serial.print("[1] received new brightness value from queue: ");
+    Serial.println(brightness);
+  }
+  
+  if(xQueueReceive(animationQueue, &animSel, 0) == pdTRUE) {
+    Serial.print("[1] received new animSel value from queue: ");
+    Serial.println(animSel);
+  }
   // start LED handling code
-
-  // Need to check how to get an analog reading in the ESP32
-  // anaReadVal = analogRead(ANALOG_PIN);
-  // buttonRead = map(anaReadVal,0,1024,0,255);
-  if (buttonReadPrev != buttonRead) {
-    Serial.print("new analog mapped value is: ");
-    Serial.println(buttonRead);
-    buttonReadPrev = buttonRead;
-    setButtonRead = true;
-    brightness = buttonRead;
-  }
-  // else take buttonValue from web to be brightness
-  else if (setButtonValue && (buttonValue > 0 && buttonValue < 255)) { 
-    brightness = buttonValue;
-    setButtonValue = false;
-  }
+  // if (setBrightnessValue && (brightnessValue >= 0 && brightnessValue < 256)) { 
+  //   brightness = brightnessValue;
+  //   setBrightnessValue = false;
+  // }
 
   // set master brightness control
   FastLED.setBrightness(brightness);
 
-  if(isPlain && (brightness < 50 || brightness > 128)) {
-    isPlain = false;
+  // disabling isPlain for now until needed (isPlain)
+  if(animSel > ( ARRAY_SIZE( gPatterns))) {
+    paintAll(CRGB::Red);
   }
-  if(!isPlain && (brightness > 60 && brightness < 120)) { 
-    isPlain = true;
-  }
-
-  if(isPlain) {
-    quiet(brightness);
+  else if (animSel > 0) {
+    // gCurrentPatternNumber = animSelValue-1;
+    gPatterns[animSel-1]();
   }
   else {
     // Call the current pattern function once, updating the 'leds' array
+    if (resetPatternNumber) {
+      gCurrentPatternNumber = 0;
+      resetPatternNumber = false;
+    }
+    if ((second() == 0) && !secondFlag){
+      nextPattern();
+      secondFlag = true;
+    }
+    if (second() != 0) {
+      secondFlag = false;
+    }
     gPatterns[gCurrentPatternNumber]();    
   }
 
@@ -371,14 +413,12 @@ void loop() {
   FastLED.delay(1000/FRAMES_PER_SECOND); 
 
   // do some periodic updates
-  EVERY_N_MILLISECONDS( 30 ) { gHue++; } // slowly cycle the "base color" through the rainbow
-  EVERY_N_SECONDS( 30 ) { nextPattern(); } // change patterns periodically
+  EVERY_N_MILLISECONDS( 50 ) { gHue++; } // slowly cycle the "base color" through the rainbow
+  // EVERY_N_SECONDS( 60 ) { nextPattern(); } // change patterns periodically
 }
 
-#define ARRAY_SIZE(A) (sizeof(A) / sizeof((A)[0]))
 
-void quiet(int brightness) {
-  byte color = map(brightness,60,120,0,255);
+void quiet(byte color) {
   for(int i=0; i<NUM_LEDS; i++) {
     leds[i] = CHSV(color, 196, 255);
   }
@@ -388,6 +428,66 @@ void nextPattern()
 {
   // add one to the current pattern number, and wrap around at the end
   gCurrentPatternNumber = (gCurrentPatternNumber + 1) % ARRAY_SIZE( gPatterns);
+}
+
+void paintRange(int start, int end, CRGB color) {
+  for(int i=start; i<end; i++) {
+    leds[i] = color;
+  }
+}
+
+void paintAll(CRGB color) {
+  paintRange(0, NUM_LEDS, color);
+}
+
+void confettiLetters() {
+  fadeToBlackBy( leds, NUM_LEDS, 10); 
+  if(random(255) < 16) {
+    int currentLetter = random(4);
+    paintRange(lettersStart[currentLetter], lettersEnd[currentLetter], CHSV(gHue, 255, 255));
+  }
+}
+
+void fill() {
+
+  static int sat = 0;
+  static uint8_t currentPixel = NUM_LEDS;
+
+  leds[currentPixel] = CHSV( (255 * 2) / 3, sat, 255);
+  EVERY_N_MILLISECONDS( 20 ) { 
+    currentPixel = (currentPixel - 1) % NUM_LEDS; 
+    if(currentPixel == 0) {
+      sat = (sat == 0? 255: 0);
+      currentPixel = NUM_LEDS;
+    }
+  }
+}
+
+void blink() {
+  static uint8_t currentBrightness = 0;
+  static int dir = 3;
+  currentBrightness = currentBrightness + dir;
+  if(currentBrightness == 255) {
+    dir = -3;
+  }
+  if(currentBrightness == 0) {
+    dir = 3;
+  }
+  paintAll(CHSV(gHue, 255, currentBrightness));
+}
+
+void splash() {
+  static int currentLetter = 0;
+  static uint8_t currentHue = 0;
+
+  paintAll(CRGB::Black);
+
+  EVERY_N_MILLISECONDS( 330 ) { 
+    currentLetter = (currentLetter + 1 ) % 4; 
+    currentHue = currentHue + 16;
+  }
+  
+  paintRange(lettersStart[currentLetter], lettersEnd[currentLetter], CHSV(currentHue, 255, 255));
 }
 
 void changeHue(int &currHue, int &destHue, int iStart, int iEnd) {
@@ -536,8 +636,13 @@ void juggle() {
 }
 
 void dotted() {
+
+  static int moveFactor = 0;
+  EVERY_N_MILLISECONDS( 500 ) { moveFactor++; } // slowly cycle the "base color" through the rainbow
+  
+  const int numberOfDots = 2;
   for(int i=0; i<NUM_LEDS; i++) {
-    uint8_t hue = gHue + i%6 * (255 / 6);
+    uint8_t hue = gHue + ( (i + moveFactor) % numberOfDots) * (255 / numberOfDots);
     leds[i] =   CHSV(hue, 255, 255);
   }
 }
