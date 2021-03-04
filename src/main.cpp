@@ -23,7 +23,7 @@ FASTLED_USING_NAMESPACE
 #define LED_TYPE    WS2811
 #define COLOR_ORDER GRB
 #define NUM_LEDS    80
-#define FRAMES_PER_SECOND  200
+#define FRAMES_PER_SECOND  100
 
 CRGB leds[NUM_LEDS];
 
@@ -65,6 +65,8 @@ void sinelon();
 void bpm();
 void juggle();
 void dotted();
+void leds_loop( void * parameter);
+
 
 int brightness = 20;
 int animSel = 0;
@@ -113,6 +115,7 @@ AdafruitIO_Feed *animSelFeed = io.feed("button");
 AdafruitIO_Feed *brightnessFeed = io.feed("brightness");
 
 TaskHandle_t Task1;
+TaskHandle_t TaskLeds;
 
 QueueHandle_t brightnessQueue;
 const int brightnessQueueSize = 10;
@@ -193,6 +196,7 @@ void MonitorLoop( void * parameter) {
 
   Serial.print("Connecting to Adafruit IO");
 
+  while (1) {
   // connect to io.adafruit.com
   io.connect();
 
@@ -211,10 +215,27 @@ void MonitorLoop( void * parameter) {
   // attach message handler for the button animation selector feed
   animSelFeed->onMessage(setAnimation);
 
+  unsigned long t_start_connection = millis();
+  const unsigned long MAX_WAIT_MS = 10*1000;
+
   // wait for a connection
-  while(io.status() < AIO_CONNECTED) {
+  while(io.status() < AIO_CONNECTED && millis() < t_start_connection + MAX_WAIT_MS) {
     Serial.print(".");
     delay(500);
+  }
+
+  if (io.status() < AIO_CONNECTED) {
+    io.wifi_disconnect();
+    Serial.print("Wifi disconnected.");
+    unsigned long t_start_waitwifi = millis();
+    while (millis() < t_start_waitwifi + MAX_WAIT_MS) {
+      delay(1000);
+      Serial.print("X");
+    }
+  } else {
+    Serial.print("connected!!");
+    break;
+  }
   }
 
   // we are connected
@@ -360,10 +381,25 @@ void setup() {
       &Task1,  /* Task handle. */
       0); /* Core where the task should run */
 
+  xTaskCreatePinnedToCore(
+      leds_loop, /* Function to implement the task */
+      "LedsTask", /* Name of the task */
+      16384,  /* Stack size in words */
+      NULL,  /* Task input parameter */
+      9,  /* Priority of the task */
+      &TaskLeds,  /* Task handle. */
+      1); /* Core where the task should run */
+
 }
 
 void loop()
 {
+  delay(1000);
+}
+
+void leds_loop( void * parameter)
+{
+  while (1) {
   // check queues for new values
   if(xQueueReceive(brightnessQueue, &brightness, 0) == pdTRUE) {
     Serial.print("[1] received new brightness value from queue: ");
@@ -415,6 +451,7 @@ void loop()
   // do some periodic updates
   EVERY_N_MILLISECONDS( 50 ) { gHue++; } // slowly cycle the "base color" through the rainbow
   // EVERY_N_SECONDS( 60 ) { nextPattern(); } // change patterns periodically
+  }
 }
 
 
