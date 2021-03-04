@@ -23,7 +23,7 @@ FASTLED_USING_NAMESPACE
 #define LED_TYPE    WS2811
 #define COLOR_ORDER GRB
 #define NUM_LEDS    80
-#define FRAMES_PER_SECOND  120
+#define FRAMES_PER_SECOND  200
 
 CRGB leds[NUM_LEDS];
 
@@ -45,7 +45,7 @@ const int lettersStart[] = {WStart,CStart,ManStart,WomanStart};
 const int lettersEnd[] = {WEnd,CEnd,ManEnd,WomanEnd};
 
 // Animations functions declarations
-void quiet(byte color);
+void quiet();
 void nextPattern();
 void paintRange(int start, int end, CRGB color);
 void paintAll(CRGB color);
@@ -74,7 +74,7 @@ bool isPlain = true;
 
 // List of patterns to cycle through.  Each is defined as a separate function below loop code.
 typedef void (*SimplePatternList[])();
-SimplePatternList gPatterns = { confetti, rainbow, singleColor, splash, blink, confettiLetters, dotted, bpm };
+SimplePatternList gPatterns = { confetti, rainbow, singleColor, splash, blink, confettiLetters, dotted, bpm, quiet };
 //SimplePatternList gPatterns = { toggle, dotted, singleColor, rainbow, confetti };
 
 uint8_t gCurrentPatternNumber = 0; // Index number of which pattern is current
@@ -385,7 +385,7 @@ void loop()
 
   // disabling isPlain for now until needed (isPlain)
   if(animSel > ( ARRAY_SIZE( gPatterns))) {
-    paintAll(CRGB::Red);
+    paintAll(CRGB::Black);
   }
   else if (animSel > 0) {
     // gCurrentPatternNumber = animSelValue-1;
@@ -418,10 +418,8 @@ void loop()
 }
 
 
-void quiet(byte color) {
-  for(int i=0; i<NUM_LEDS; i++) {
-    leds[i] = CHSV(color, 196, 255);
-  }
+void quiet() {
+  paintAll(CRGB::Red);
 }
 
 void nextPattern()
