@@ -44,6 +44,13 @@ enum WhichLeds {
 const int lettersStart[] = {WStart,CStart,ManStart,WomanStart};
 const int lettersEnd[] = {WEnd,CEnd,ManEnd,WomanEnd};
 
+// amount of time in seconds to wait between wifi connection attempts
+static const unsigned long WAIT_FOR_WIFI_RECONNECT = 7;
+
+// amount of time in seconds to try and connect while wifi is up (risky time)
+static const unsigned long MAX_WAIT_WIFI = 1;
+
+
 // Animations functions declarations
 void quiet();
 void nextPattern();
@@ -65,6 +72,7 @@ void sinelon();
 void bpm();
 void juggle();
 void dotted();
+
 
 int brightness = 20;
 int animSel = 0;
@@ -189,12 +197,38 @@ time_t timeSync()
   return (secTime + TZ_HOUR_SHIFT * 3600);
 }
 
-void MonitorLoop( void * parameter) {
 
-  Serial.print("Connecting to Adafruit IO");
+bool check_and_connect()
+{
+  if (io.status() >= AIO_CONNECTED) {
+    return true;
+  }
 
   // connect to io.adafruit.com
   io.connect();
+  
+  unsigned long t_start_connection = millis();
+  
+  // wait for a connection
+  while(io.status() < AIO_CONNECTED && millis() < t_start_connection + MAX_WAIT_WIFI * 1000) {
+    Serial.print(".");
+    delay(500);
+  }
+
+  if (io.status() >= AIO_CONNECTED) {
+    Serial.print("connected!!");
+    return true;
+  } else {
+    io.wifi_disconnect();
+  }
+  return false;
+}
+
+
+void MonitorLoop( void * parameter) {
+
+  Serial.print("Connecting to Adafruit IO");
+  check_and_connect();
 
   // attach message handler for the seconds feed
   seconds->onMessage(handleSecs);
@@ -210,12 +244,6 @@ void MonitorLoop( void * parameter) {
 
   // attach message handler for the button animation selector feed
   animSelFeed->onMessage(setAnimation);
-
-  // wait for a connection
-  while(io.status() < AIO_CONNECTED) {
-    Serial.print(".");
-    delay(500);
-  }
 
   // we are connected
   Serial.println();
@@ -273,6 +301,14 @@ void MonitorLoop( void * parameter) {
   ArduinoOTA.begin();
 
   for(;;) {
+  
+  while (!check_and_connect()) {
+    Serial.print("Blocking for ");
+    Serial.print(WAIT_FOR_WIFI_RECONNECT);
+    Serial.println(" seconds");
+    delay(WAIT_FOR_WIFI_RECONNECT*1000);
+  }
+
   unsigned int currTime = millis();
 
   ArduinoOTA.handle();
