@@ -44,6 +44,13 @@ enum WhichLeds {
 const int lettersStart[] = {WStart,CStart,ManStart,WomanStart};
 const int lettersEnd[] = {WEnd,CEnd,ManEnd,WomanEnd};
 
+// amount of time in seconds to wait between wifi connection attempts
+static const unsigned long WAIT_FOR_WIFI_RECONNECT = 7;
+
+// amount of time in seconds to try and connect while wifi is up (risky time)
+static const unsigned long MAX_WAIT_WIFI = 1;
+
+
 // Animations functions declarations
 void quiet();
 void nextPattern();
@@ -65,7 +72,6 @@ void sinelon();
 void bpm();
 void juggle();
 void dotted();
-void leds_loop( void * parameter);
 
 
 int brightness = 20;
@@ -115,7 +121,6 @@ AdafruitIO_Feed *animSelFeed = io.feed("button");
 AdafruitIO_Feed *brightnessFeed = io.feed("brightness");
 
 TaskHandle_t Task1;
-TaskHandle_t TaskLeds;
 
 QueueHandle_t brightnessQueue;
 const int brightnessQueueSize = 10;
@@ -192,13 +197,38 @@ time_t timeSync()
   return (secTime + TZ_HOUR_SHIFT * 3600);
 }
 
+
+bool check_and_connect()
+{
+  if (io.status() >= AIO_CONNECTED) {
+    return true;
+  }
+
+  // connect to io.adafruit.com
+  io.connect();
+  
+  unsigned long t_start_connection = millis();
+  
+  // wait for a connection
+  while(io.status() < AIO_CONNECTED && millis() < t_start_connection + MAX_WAIT_WIFI * 1000) {
+    Serial.print(".");
+    delay(500);
+  }
+
+  if (io.status() >= AIO_CONNECTED) {
+    Serial.print("connected!!");
+    return true;
+  } else {
+    io.wifi_disconnect();
+  }
+  return false;
+}
+
+
 void MonitorLoop( void * parameter) {
 
   Serial.print("Connecting to Adafruit IO");
-
-  while (1) {
-  // connect to io.adafruit.com
-  io.connect();
+  check_and_connect();
 
   // attach message handler for the seconds feed
   seconds->onMessage(handleSecs);
@@ -214,29 +244,6 @@ void MonitorLoop( void * parameter) {
 
   // attach message handler for the button animation selector feed
   animSelFeed->onMessage(setAnimation);
-
-  unsigned long t_start_connection = millis();
-  const unsigned long MAX_WAIT_MS = 10*1000;
-
-  // wait for a connection
-  while(io.status() < AIO_CONNECTED && millis() < t_start_connection + MAX_WAIT_MS) {
-    Serial.print(".");
-    delay(500);
-  }
-
-  if (io.status() < AIO_CONNECTED) {
-    io.wifi_disconnect();
-    Serial.print("Wifi disconnected.");
-    unsigned long t_start_waitwifi = millis();
-    while (millis() < t_start_waitwifi + MAX_WAIT_MS) {
-      delay(1000);
-      Serial.print("X");
-    }
-  } else {
-    Serial.print("connected!!");
-    break;
-  }
-  }
 
   // we are connected
   Serial.println();
@@ -294,6 +301,14 @@ void MonitorLoop( void * parameter) {
   ArduinoOTA.begin();
 
   for(;;) {
+  
+  while (!check_and_connect()) {
+    Serial.print("Blocking for ");
+    Serial.print(WAIT_FOR_WIFI_RECONNECT);
+    Serial.println(" seconds");
+    delay(WAIT_FOR_WIFI_RECONNECT*1000);
+  }
+
   unsigned int currTime = millis();
 
   ArduinoOTA.handle();
@@ -381,25 +396,10 @@ void setup() {
       &Task1,  /* Task handle. */
       0); /* Core where the task should run */
 
-  xTaskCreatePinnedToCore(
-      leds_loop, /* Function to implement the task */
-      "LedsTask", /* Name of the task */
-      16384,  /* Stack size in words */
-      NULL,  /* Task input parameter */
-      9,  /* Priority of the task */
-      &TaskLeds,  /* Task handle. */
-      1); /* Core where the task should run */
-
 }
 
 void loop()
 {
-  delay(1000);
-}
-
-void leds_loop( void * parameter)
-{
-  while (1) {
   // check queues for new values
   if(xQueueReceive(brightnessQueue, &brightness, 0) == pdTRUE) {
     Serial.print("[1] received new brightness value from queue: ");
@@ -451,7 +451,6 @@ void leds_loop( void * parameter)
   // do some periodic updates
   EVERY_N_MILLISECONDS( 50 ) { gHue++; } // slowly cycle the "base color" through the rainbow
   // EVERY_N_SECONDS( 60 ) { nextPattern(); } // change patterns periodically
-  }
 }
 
 
